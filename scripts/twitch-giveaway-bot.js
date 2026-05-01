@@ -1,90 +1,107 @@
 const tmi = require("tmi.js");
+const fetch = require("node-fetch");
 
-const CHANNEL = "trashguy__";
-const API_URL = "http://localhost:3000/api/chat-giveaway/enter";
+const TWITCH_USERNAME = process.env.TWITCH_USERNAME;
+const TWITCH_OAUTH_TOKEN = process.env.TWITCH_OAUTH_TOKEN;
+const CHANNEL_NAME = process.env.CHANNEL_NAME || "trashguy__";
+const API_BASE = (process.env.API_URL || "https://trashguy.me").replace(/\/$/, "");
 
-let enteredUsers = new Set();
-const cooldownUsers = new Set();
+const KEYWORD = "trash";
+
+console.log("Bot starting...");
+console.log("CHANNEL_NAME:", CHANNEL_NAME);
+console.log("API_BASE:", API_BASE);
+console.log("CHECK URL:", `${API_BASE}/api/chat-giveaway`);
+console.log("ENTER URL:", `${API_BASE}/api/chat-giveaway/enter`);
+
+if (!TWITCH_USERNAME || !TWITCH_OAUTH_TOKEN) {
+  console.error("Missing TWITCH_USERNAME or TWITCH_OAUTH_TOKEN");
+  process.exit(1);
+}
 
 const client = new tmi.Client({
-  connection: {
-    secure: true,
-    reconnect: true,
+  options: { debug: false },
+  identity: {
+    username: TWITCH_USERNAME,
+    password: TWITCH_OAUTH_TOKEN,
   },
-  channels: [CHANNEL],
+  channels: [CHANNEL_NAME],
 });
 
-client.connect();
-
-setInterval(async () => {
+async function checkGiveawayState() {
   try {
-    const res = await fetch("http://localhost:3000/api/chat-giveaway");
-    const data = await res.json();
+    const res = await fetch(`${API_BASE}/api/chat-giveaway`, {
+      method: "GET",
+      headers: { "User-Agent": "trashguy-bot" },
+    });
 
-    if (data?.giveaway?.status !== "live") {
-      enteredUsers = new Set(); // reset when no live giveaway
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.log("Giveaway state bad response:", res.status, text);
+      return null;
     }
+
+    return JSON.parse(text);
   } catch (err) {
-    console.log("Failed to check giveaway state");
+    console.log("Failed to check giveaway state:", err.message);
+    return null;
   }
-}, 5000);
+}
+
+async function enterGiveaway(username, displayName) {
+  try {
+    const res = await fetch(`${API_BASE}/api/chat-giveaway/enter`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "trashguy-bot",
+      },
+      body: JSON.stringify({
+        username,
+        display_name: displayName || username,
+      }),
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      console.log("Entry bad response:", res.status, text);
+      return;
+    }
+
+    console.log("Entry response:", text);
+  } catch (err) {
+    console.log("Entry failed:", err.message);
+  }
+}
 
 client.on("message", async (channel, tags, message, self) => {
   if (self) return;
 
-  const text = String(message || "").trim().toLowerCase();
-
-  if (text !== "trash") return;
+  const msg = String(message || "").trim().toLowerCase();
+  if (msg !== KEYWORD) return;
 
   const username = String(tags.username || "").toLowerCase();
-
-if (!username) return;
-
-if (enteredUsers.has(username)) {
-  console.log(`${username} already entered`);
-  return;
-}
-
-if (cooldownUsers.has(username)) {
-  console.log(`${username} is on cooldown`);
-  return;
-}
-
-cooldownUsers.add(username);
-
-setTimeout(() => {
-  cooldownUsers.delete(username);
-}, 10000);
-
   const displayName = tags["display-name"] || username;
-  const twitchId = tags["user-id"] || "";
 
-  if (!username) return;
+  console.log(`${username} typed ${KEYWORD}`);
 
-  try {
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        username,
-        display_name: displayName,
-        twitch_id: twitchId,
-        avatar_url: "",
-      }),
-    });
+  const state = await checkGiveawayState();
 
-    const data = await res.json();
-
-    if (data.ok) {
-  console.log(`${displayName} entered giveaway x${data.entry.weight}`);
-} else {
-      console.log(`${displayName} failed: ${data.error}`);
-    }
-  } catch (error) {
-    console.log("Entry failed:", error.message);
+  if (!state?.ok || state?.giveaway?.status !== "live") {
+    console.log("No live giveaway.");
+    return;
   }
+
+  await enterGiveaway(username, displayName);
 });
 
-console.log(`Listening for "trash" in ${CHANNEL} chat...`);
+client
+  .connect()
+  .then(() => {
+    console.log(`Listening for "${KEYWORD}" in ${CHANNEL_NAME} chat...`);
+  })
+  .catch((err) => {
+    console.error("Twitch connect failed:", err.message);
+  });
